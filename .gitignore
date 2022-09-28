@@ -1,0 +1,7 @@
+# IDE config
+.idea/
+
+# ENV variable declaration
+.env
+
+
