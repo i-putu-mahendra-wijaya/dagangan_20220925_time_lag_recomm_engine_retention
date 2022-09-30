@@ -8,6 +8,7 @@ import itertools
 import numpy as np
 from dotenv import load_dotenv
 import yaml
+import matplotlib.pyplot as plt
 from yaml.loader import SafeLoader
 from project_custom_package.BigQueryFetcher import BigQueryFetcher
 
@@ -202,5 +203,33 @@ def create_time_series_count_sku(tmp_trx_histories: pd.DataFrame) -> pd.DataFram
 
     ts_count_sku.reset_index(inplace=True)
 
+    return ts_count_sku
+
 
 ts_count_sku = create_time_series_count_sku(tmp_trx_histories=tmp_trx_histories)
+
+
+def create_time_series_llu(tmp_trx_histories: pd.DataFrame) -> pd.DataFrame:
+    tmp_trx_from_llu = tmp_trx_histories[tmp_trx_histories["is_long_lived_user"] == 1]
+
+    tth_groupbyweek = tmp_trx_from_llu.groupby("trx_week")
+
+    def calc_count_long_lived_user(df_block):
+        list_long_lived_users = df_block["user_id"].unique()
+        count_long_lived_user = len(list_long_lived_users)
+        return count_long_lived_user
+
+    ts_count_llu = tth_groupbyweek.apply(
+        lambda x: pd.Series({
+            "count_long_lived_user": calc_count_long_lived_user(x)
+        })
+    )
+
+    ts_count_llu.reset_index(inplace=True)
+
+    return ts_count_llu
+
+
+ts_count_llu = create_time_series_llu(tmp_trx_histories=tmp_trx_histories)
+
+plt.plot(x=ts_count_llu["trx_week"], y=ts_count_llu["count_long_lived_user"])
