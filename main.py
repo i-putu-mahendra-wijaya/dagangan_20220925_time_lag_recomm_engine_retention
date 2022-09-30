@@ -8,9 +8,9 @@ import itertools
 import numpy as np
 from dotenv import load_dotenv
 import yaml
-import matplotlib.pyplot as plt
 from yaml.loader import SafeLoader
 from project_custom_package.BigQueryFetcher import BigQueryFetcher
+import matplotlib.pyplot as plt
 
 # load env variables
 load_dotenv()
@@ -232,4 +232,34 @@ def create_time_series_llu(tmp_trx_histories: pd.DataFrame) -> pd.DataFrame:
 
 ts_count_llu = create_time_series_llu(tmp_trx_histories=tmp_trx_histories)
 
-plt.plot(x=ts_count_llu["trx_week"], y=ts_count_llu["count_long_lived_user"])
+ts_sku_llu = ts_count_sku.merge(ts_count_llu, how="inner", on="trx_week")
+
+def convert_period_to_timestamp(each_period):
+    corres_timestamp = each_period.end_time
+
+    return corres_timestamp
+
+
+ts_sku_llu["week_end_time"] = ts_sku_llu["trx_week"].apply(lambda x: convert_period_to_timestamp(x))
+
+fig, ax = plt.subplots()
+
+ax.plot(ts_sku_llu["week_end_time"],
+        ts_sku_llu["avg_count_sku"],
+        color="red")
+
+ax.set_xlabel("trx_week")
+ax.set_ylabel("avg_count_sku")
+
+ax2 = ax.twinx()
+
+ax2.plot(ts_sku_llu["week_end_time"],
+         ts_sku_llu["count_long_lived_user"],
+         color="blue")
+
+ax.set_ylabel("count_long_lived_user")
+plt.show()
+
+fig.savefig("time series count sku & count long-lived user.png",
+            format="png",
+            bbox_inches="tight")
