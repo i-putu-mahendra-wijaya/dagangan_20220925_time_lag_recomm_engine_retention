@@ -234,6 +234,7 @@ ts_count_llu = create_time_series_llu(tmp_trx_histories=tmp_trx_histories)
 
 ts_sku_llu = ts_count_sku.merge(ts_count_llu, how="inner", on="trx_week")
 
+
 def convert_period_to_timestamp(each_period):
     corres_timestamp = each_period.end_time
 
@@ -241,25 +242,47 @@ def convert_period_to_timestamp(each_period):
 
 
 ts_sku_llu["week_end_time"] = ts_sku_llu["trx_week"].apply(lambda x: convert_period_to_timestamp(x))
+ts_sku_llu.drop(["trx_week"], axis=1)
+ts_sku_llu = ts_sku_llu[["week_end_time", "avg_count_sku", "count_long_lived_user"]]
+ts_sku_llu = ts_sku_llu.rename(columns={"week_end_time": "trx_week"})
 
-fig, ax = plt.subplots()
+tsl_minmax_norm = ts_sku_llu.copy()
 
-ax.plot(ts_sku_llu["week_end_time"],
-        ts_sku_llu["avg_count_sku"],
-        color="red")
+for col in ["avg_count_sku", "count_long_lived_user"]:
+    tsl_minmax_norm[col] = (tsl_minmax_norm[col] - tsl_minmax_norm[col].min()) / (tsl_minmax_norm[col].max() - tsl_minmax_norm[col].min())
 
-ax.set_xlabel("trx_week")
-ax.set_ylabel("avg_count_sku")
+# apply exponential-weighted mean to smoothen tsl_minmax_normalized, windows size = 10 period
+tsl_minmax_norm["avg_count_sku"] = tsl_minmax_norm["avg_count_sku"].ewm(span=10).mean()
+tsl_minmax_norm["count_long_lived_user"] = tsl_minmax_norm["count_long_lived_user"].ewm(span=10).mean()
 
-ax2 = ax.twinx()
+def plot_time_series(ts_sku_llu: pd.DataFrame):
+    fig, ax1 = plt.subplots()
 
-ax2.plot(ts_sku_llu["week_end_time"],
-         ts_sku_llu["count_long_lived_user"],
-         color="blue")
+    ax1_color = "#E68D44"
 
-ax.set_ylabel("count_long_lived_user")
-plt.show()
+    ax1.plot(ts_sku_llu["trx_week"],
+             ts_sku_llu["avg_count_sku"],
+             color=ax1_color)
 
-fig.savefig("time series count sku & count long-lived user.png",
-            format="png",
-            bbox_inches="tight")
+    ax1.set_xlabel("trx_week")
+    ax1.set_ylabel("avg_count_sku", color=ax1_color)
+    ax1.tick_params(axis="y", labelcolor=ax1_color)
+
+    ax2 = ax1.twinx()
+
+    ax2_color = "#1889F0"
+
+    ax2.plot(ts_sku_llu["trx_week"],
+             ts_sku_llu["count_long_lived_user"],
+             color=ax2_color)
+
+    ax2.set_ylabel("count_long_lived_user", color=ax2_color)
+    ax2.tick_params(axis="y", labelcolor=ax2_color)
+    plt.show()
+
+    # save png image to current folder
+    # fig.savefig("time series count sku & count long-lived user.png",
+    #             format="png")
+
+
+plot_time_series(ts_sku_llu=tsl_minmax_norm)
