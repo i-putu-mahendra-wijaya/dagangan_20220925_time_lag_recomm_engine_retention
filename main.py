@@ -39,6 +39,22 @@ def fetch_trx_histories_from_gbq() -> pd.DataFrame:
 trx_histories = fetch_trx_histories_from_gbq()
 
 
+def fetch_sales_visit_histories_from_gbq():
+    sales_visi_histories_sql_path = os.path.join(query_directory_path, "sales_visit_histories.sql")
+
+    with open(sales_visi_histories_sql_path) as query_file:
+        sales_visit_histories_sql = query_file.read()
+
+    sales_visit_histories_query_string = f"""{sales_visit_histories_sql}"""
+    sales_visit_histories_bqclient = BigQueryFetcher(sales_visit_histories_query_string)
+    sales_visit_histories = sales_visit_histories_bqclient.fetch_data()
+
+    return sales_visit_histories
+
+
+sales_visit_histories = fetch_sales_visit_histories_from_gbq()
+
+
 def create_user_trx_table(trx_histories: pd.DataFrame) -> pd.DataFrame:
     user_trx = trx_histories[["trx_date", "count_sku", "user_id", "registration_date"]]
 
@@ -187,6 +203,21 @@ def filter_trx_histories(trx_histories: pd.DataFrame, user_df: pd.DataFrame) -> 
 tmp_trx_histories = filter_trx_histories(trx_histories=trx_histories, user_df=user_df)
 
 
+def filter_sales_visit_histories(sales_visit_histories: pd.DataFrame, user_df: pd.DataFrame) -> pd.DataFrame:
+    user_filter = sales_visit_histories["user_id"].isin(user_df["user_id"])
+
+    tmp_sales_visit_histories = sales_visit_histories[user_filter]
+
+    tmp_sales_visit_histories["visit_date"] = pd.to_datetime(tmp_sales_visit_histories["visit_date"], format="%Y-%m-%d")
+
+    tmp_sales_visit_histories["visit_week"] = tmp_sales_visit_histories["visit_date"].dt.to_period("W")
+
+    return tmp_sales_visit_histories
+
+
+tmp_sales_visit_histories = filter_sales_visit_histories(sales_visit_histories=sales_visit_histories, user_df=user_df)
+
+
 def create_time_series_count_sku(tmp_trx_histories: pd.DataFrame) -> pd.DataFrame:
     tth_groupbyweek = tmp_trx_histories.groupby("trx_week")
 
@@ -207,6 +238,27 @@ def create_time_series_count_sku(tmp_trx_histories: pd.DataFrame) -> pd.DataFram
 
 
 ts_count_sku = create_time_series_count_sku(tmp_trx_histories=tmp_trx_histories)
+
+
+def create_time_series_count_visit(tmp_sales_visit_histories: pd.DataFrame) -> pd.DataFrame:
+    tsv_groupbyweek = tmp_sales_visit_histories.groupby("visit_week")
+
+    def calc_count_visit(df_block: pd.DataFrame):
+        count_visit = len(df_block["user_id"].unique())
+        return count_visit
+
+    ts_count_visit = tsv_groupbyweek.apply(
+        lambda x: pd.Series({
+            "count_visit": calc_count_visit(x)
+        })
+    )
+
+    ts_count_visit.reset_index(inplace=True)
+
+    return ts_count_visit
+
+
+ts_count_visit = create_time_series_count_visit(tmp_sales_visit_histories=tmp_sales_visit_histories)
 
 
 def create_time_series_llu(tmp_trx_histories: pd.DataFrame) -> pd.DataFrame:
@@ -232,30 +284,71 @@ def create_time_series_llu(tmp_trx_histories: pd.DataFrame) -> pd.DataFrame:
 
 ts_count_llu = create_time_series_llu(tmp_trx_histories=tmp_trx_histories)
 
+ts_count_llu_for_cvs = ts_count_llu.copy()
+ts_count_llu_for_cvs.rename(columns={
+    "trx_week": "visit_week"
+}, inplace=True)
+
 ts_sku_llu = ts_count_sku.merge(ts_count_llu, how="inner", on="trx_week")
 
-
-def convert_period_to_timestamp(each_period):
-    corres_timestamp = each_period.end_time
-
-    return corres_timestamp
+ts_cvs_llu = ts_count_visit.merge(ts_count_llu_for_cvs, how="inner", on="visit_week")
 
 
-ts_sku_llu["week_end_time"] = ts_sku_llu["trx_week"].apply(lambda x: convert_period_to_timestamp(x))
-ts_sku_llu.drop(["trx_week"], axis=1)
-ts_sku_llu = ts_sku_llu[["week_end_time", "avg_count_sku", "count_long_lived_user"]]
-ts_sku_llu = ts_sku_llu.rename(columns={"week_end_time": "trx_week"})
+def normalize_ts_sku_llu(ts_sku_llu: pd.DataFrame) -> pd.DataFrame:
+    def convert_period_to_timestamp(each_period):
+        corres_timestamp = each_period.end_time
 
-tsl_minmax_norm = ts_sku_llu.copy()
+        return corres_timestamp
 
-for col in ["avg_count_sku", "count_long_lived_user"]:
-    tsl_minmax_norm[col] = (tsl_minmax_norm[col] - tsl_minmax_norm[col].min()) / (tsl_minmax_norm[col].max() - tsl_minmax_norm[col].min())
+    ts_sku_llu["week_end_time"] = ts_sku_llu["trx_week"].apply(lambda x: convert_period_to_timestamp(x))
+    ts_sku_llu.drop(["trx_week"], axis=1)
+    ts_sku_llu = ts_sku_llu[["week_end_time", "avg_count_sku", "count_long_lived_user"]]
+    ts_sku_llu = ts_sku_llu.rename(columns={"week_end_time": "trx_week"})
 
-# apply exponential-weighted mean to smoothen tsl_minmax_normalized, windows size = 10 period
-tsl_minmax_norm["avg_count_sku"] = tsl_minmax_norm["avg_count_sku"].ewm(span=10).mean()
-tsl_minmax_norm["count_long_lived_user"] = tsl_minmax_norm["count_long_lived_user"].ewm(span=10).mean()
+    tsl_minmax_norm = ts_sku_llu.copy()
 
-def plot_time_series(ts_sku_llu: pd.DataFrame):
+    for col in ["avg_count_sku", "count_long_lived_user"]:
+        tsl_minmax_norm[col] = (tsl_minmax_norm[col] - tsl_minmax_norm[col].min()) / (
+                tsl_minmax_norm[col].max() - tsl_minmax_norm[col].min())
+
+    # apply exponential-weighted mean to smoothen tsl_minmax_normalized, windows size = 10 period
+    tsl_minmax_norm["avg_count_sku"] = tsl_minmax_norm["avg_count_sku"].ewm(span=10).mean()
+    tsl_minmax_norm["count_long_lived_user"] = tsl_minmax_norm["count_long_lived_user"].ewm(span=10).mean()
+
+    return tsl_minmax_norm
+
+
+tsl_minmax_norm = normalize_ts_sku_llu(ts_sku_llu=ts_sku_llu)
+
+
+def normalize_ts_cvs_llu(ts_cvs_llu: pd.DataFrame) -> pd.DataFrame:
+    def convert_period_to_timestamp(each_period):
+        corres_timestamp = each_period.end_time
+
+        return corres_timestamp
+
+    ts_cvs_llu["week_end_time"] = ts_cvs_llu["visit_week"].apply(lambda x: convert_period_to_timestamp(x))
+    ts_cvs_llu.drop(["visit_week"], axis=1)
+    ts_cvs_llu = ts_cvs_llu[["week_end_time", "count_visit", "count_long_lived_user"]]
+    ts_cvs_llu = ts_cvs_llu.rename(columns={"week_end_time": "visit_week"})
+
+    tsl_minmax_norm = ts_cvs_llu.copy()
+
+    for col in ["count_visit", "count_long_lived_user"]:
+        tsl_minmax_norm[col] = (tsl_minmax_norm[col] - tsl_minmax_norm[col].min()) / (
+                tsl_minmax_norm[col].max() - tsl_minmax_norm[col].min())
+
+    # apply exponential-weighted mean to smoothen tsl_minmax_normalized, windows size = 10 period
+    tsl_minmax_norm["count_visit"] = tsl_minmax_norm["count_visit"].ewm(span=10).mean()
+    tsl_minmax_norm["count_long_lived_user"] = tsl_minmax_norm["count_long_lived_user"].ewm(span=10).mean()
+
+    return tsl_minmax_norm
+
+
+tcl_minmax_norm = normalize_ts_cvs_llu(ts_cvs_llu=ts_cvs_llu)
+
+
+def plot_ts_sku_llu(ts_sku_llu: pd.DataFrame):
     fig, ax1 = plt.subplots()
 
     ax1_color = "#E68D44"
@@ -285,4 +378,113 @@ def plot_time_series(ts_sku_llu: pd.DataFrame):
     #             format="png")
 
 
-plot_time_series(ts_sku_llu=tsl_minmax_norm)
+# plot_ts_sku_llu(ts_sku_llu=tsl_minmax_norm)
+
+def plot_ts_cvs_llu(ts_cvs_llu: pd.DataFrame) -> pd.DataFrame:
+    fig, ax1 = plt.subplots()
+
+    ax1_color = "#E68D44"
+
+    ax1.plot(ts_cvs_llu["visit_week"],
+             ts_cvs_llu["count_visit"],
+             color=ax1_color)
+
+    ax1.set_xlabel("visit_week")
+    ax1.set_ylabel("count_visit", color=ax1_color)
+    ax1.tick_params(axis="y", labelcolor=ax1_color)
+
+    ax2 = ax1.twinx()
+
+    ax2_color = "#1889F0"
+
+    ax2.plot(ts_cvs_llu["visit_week"],
+             ts_cvs_llu["count_long_lived_user"],
+             color=ax2_color)
+
+    ax2.set_ylabel("count_long_lived_user", color=ax2_color)
+    ax2.tick_params(axis="y", labelcolor=ax2_color)
+    plt.show()
+
+
+# plot_ts_cvs_llu(ts_cvs_llu=tcl_minmax_norm)
+
+
+# calculate Time-Lagged Cross Correlation (TLCC)
+
+def crosscorr(datax, datay, lag=0, wrap=False):
+    """ Lag-N cross correlation.
+    Shifted data filled with NaNs
+
+    Parameters
+    ----------
+    lag : int, default 0
+    datax, datay : pandas.Series objects of equal length
+    Returns
+    ----------
+    crosscorr : float
+    """
+    if wrap:
+        shiftedy = datay.shift(lag)
+        shiftedy.iloc[:lag] = datay.iloc[-lag:].values
+        return datax.corr(shiftedy)
+    else:
+        return datax.corr(datay.shift(lag))
+
+
+correl_window = range(0, len(tsl_minmax_norm))
+
+rs_count_sku = [
+    crosscorr(
+        datax=tsl_minmax_norm["avg_count_sku"],
+        datay=tsl_minmax_norm["count_long_lived_user"],
+        lag=lag)
+    for lag in correl_window
+]
+
+rs_count_visit = [
+    crosscorr(
+        datax=tcl_minmax_norm["count_long_lived_user"],
+        datay=tcl_minmax_norm["count_visit"],
+        lag=lag
+    )
+    for lag in correl_window
+]
+
+ts_shift = [len(tsl_minmax_norm) - lag for lag in correl_window]
+
+tlcc_df = pd.DataFrame(data={
+    "ts_shift": ts_shift,
+    "cross_correl_count_sku": rs_count_sku,
+    "cross_correl_count_visit": rs_count_visit
+})
+
+
+def plot_tlcc(tlcc_df: pd.DataFrame):
+    fig, ax1 = plt.subplots(nrows=1, ncols=1)
+
+    ax1_color = "#E68D44"
+    ax1.plot("ts_shift", "cross_correl_count_sku", data=tlcc_df, color=ax1_color)
+    ax1.set_xlabel("time shift (week)")
+    ax1.set_ylabel("cross correl count sku", color=ax1_color)
+    ax1.axes.yaxis.set_ticklabels([])
+    ax1.tick_params(axis="y", labelcolor=ax1_color)
+
+    ax2_color = "#1889F0"
+
+    ax2 = ax1.twinx()
+
+    ax2.plot("ts_shift", "cross_correl_count_visit", data=tlcc_df, color=ax2_color)
+
+    ax2.set_ylabel("cross_correl_count_visitr", color=ax2_color)
+    ax2.axes.yaxis.set_ticklabels([])
+    ax2.tick_params(axis="y", labelcolor=ax2_color)
+
+    plt.title(label="Time-Lagged Cross Correlation (TLCC) to count long-lived user", y=1.05)
+
+    plt.axvline(x=20, color="#1889F0", linestyle="--", alpha=0.5, label="sigf correl count visit")
+    plt.axvline(x=35, color="#E68D44", linestyle="--", alpha=0.5, label="sigf correl count sku")
+
+    plt.show()
+
+
+plot_tlcc(tlcc_df=tlcc_df)
